@@ -13,7 +13,7 @@
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 */
 
-include { RNA-TOOLS  } from './workflows/rna-tools'
+include { RNA_TOOLS  } from './workflows/rna-tools'
 include { PIPELINE_INITIALISATION } from './subworkflows/local/utils_nfcore_rna-tools_pipeline'
 include { PIPELINE_COMPLETION     } from './subworkflows/local/utils_nfcore_rna-tools_pipeline'
 include { getGenomeAttribute      } from './subworkflows/local/utils_nfcore_rna-tools_pipeline'
@@ -38,7 +38,7 @@ params.fasta = getGenomeAttribute('fasta')
 //
 // WORKFLOW: Run main analysis pipeline depending on type of input
 //
-workflow SEASONEDRICEFARMER_RNA-TOOLS {
+workflow SEASONEDRICEFARMER_RNA_TOOLS {
 
     take:
     samplesheet // channel: samplesheet read in from --input
@@ -48,7 +48,7 @@ workflow SEASONEDRICEFARMER_RNA-TOOLS {
     //
     // WORKFLOW: Run pipeline
     //
-    RNA-TOOLS (
+    RNA_TOOLS (
         samplesheet,
         params.multiqc_config,
         params.multiqc_logo,
@@ -56,7 +56,7 @@ workflow SEASONEDRICEFARMER_RNA-TOOLS {
         params.outdir,
     )
     emit:
-    multiqc_report = RNA-TOOLS.out.multiqc_report // channel: /path/to/multiqc_report.html
+    multiqc_report = RNA_TOOLS.out.multiqc_report // channel: /path/to/multiqc_report.html
 }
 /*
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -85,7 +85,7 @@ workflow {
     //
     // WORKFLOW: Run main workflow
     //
-    SEASONEDRICEFARMER_RNA-TOOLS (
+    SEASONEDRICEFARMER_RNA_TOOLS (
         PIPELINE_INITIALISATION.out.samplesheet
     )
     //
@@ -97,7 +97,7 @@ workflow {
         params.plaintext_email,
         params.outdir,
         params.monochrome_logs,
-        SEASONEDRICEFARMER_RNA-TOOLS.out.multiqc_report
+        SEASONEDRICEFARMER_RNA_TOOLS.out.multiqc_report
     )
 }
 

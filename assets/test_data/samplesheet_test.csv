@@ -1,0 +1,2 @@
+sample,fastq_1,fastq_2
+WHOLE_BLOOD_TEST,assets/test_data/fastq/SRR23992075_1.fastq.gz,assets/test_data/fastq/SRR23992075_2.fastq.gz
