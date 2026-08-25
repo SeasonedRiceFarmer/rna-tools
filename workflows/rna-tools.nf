@@ -4,6 +4,7 @@
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 */
 include { FASTQC                 } from '../modules/nf-core/fastqc/main'
+include { FASTQC as FASTQC_TRIMMED } from '../modules/nf-core/fastqc/main'
 include { FASTP                  } from '../modules/nf-core/fastp/main'
 include { MULTIQC                } from '../modules/nf-core/multiqc/main'
 include { paramsSummaryMap       } from 'plugin/nf-schema'
@@ -67,7 +68,6 @@ workflow RNA_TOOLS {
     // its own HTML/JSON report (pre vs post-trim stats), which
     // also gets collected into ch_multiqc_files.
     // TODO: Add an option for "trim galore!" or other tools. 
-    // TODO: Might add another FASTQC step to ensure quality after FASTP. 
 
     FASTP(
         ch_fastp_input,
@@ -84,6 +84,20 @@ workflow RNA_TOOLS {
 
     // Updates the channel so that the channel can later be given to MultiQC. (Fastp JSON report)
     ch_multiqc_files = ch_multiqc_files.mix(FASTP.out.json.map{ _meta, file -> file })
+
+    // ── STEP 3: FASTQC ──────────────────────────────────────
+    // FastQC again to verify Fastp successfully trimmed
+    // for higher quality.
+
+    // Tag the meta.id with a "_trimmed" suffix so the output
+    // files (and thus filenames) are distinguishable from the
+    // raw FastQC run above — MultiQC groups by filename pattern,
+    // and both runs would otherwise collide in one section.
+    ch_fastqc_trimmed_input = ch_trimmed_reads.map { meta, reads -> [ meta + [id: "${meta.id}_trimmed"], reads ] }
+
+    FASTQC_TRIMMED(ch_fastqc_trimmed_input)
+
+    ch_multiqc_files = ch_multiqc_files.mix(FASTQC_TRIMMED.out.zip.map{ _meta, file -> file })
 
     //
     // Collate and save software versions
