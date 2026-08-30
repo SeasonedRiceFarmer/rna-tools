@@ -6,7 +6,10 @@
 include { FASTQC                 } from '../modules/nf-core/fastqc/main'
 include { FASTQC as FASTQC_TRIMMED } from '../modules/nf-core/fastqc/main'
 include { FASTP                  } from '../modules/nf-core/fastp/main'
+include { BBMAP_BBSPLIT          } from '../modules/nf-core/bbmap/bbsplit/main'
 include { MULTIQC                } from '../modules/nf-core/multiqc/main'
+include { SORTMERNA                } from '../modules/nf-core/sortmerna/main'
+
 include { paramsSummaryMap       } from 'plugin/nf-schema'
 include { paramsSummaryMultiqc   } from '../subworkflows/nf-core/utils_nfcore_pipeline'
 include { softwareVersionsToYAML } from '../subworkflows/nf-core/utils_nfcore_pipeline'
@@ -98,6 +101,49 @@ workflow RNA_TOOLS {
     FASTQC_TRIMMED(ch_fastqc_trimmed_input)
 
     ch_multiqc_files = ch_multiqc_files.mix(FASTQC_TRIMMED.out.zip.map{ _meta, file -> file })
+
+
+    // ── STEP 4: BBSplit (optional) ──────────────────────────
+    // Screens trimmed reads against extra "contaminant" genomes
+    // (bacteria/fungi/virus) alongside the primary human genome,
+    // and keeps only the reads that best match the human genome.
+    // Off by default: --perform_bbsplit false, since building and
+    // running against these indices is expensive and most runs
+    // won't need contamination screening.
+
+    ch_filtered_reads = ch_trimmed_reads
+
+    if (params.perform_bbsplit) {
+        if (!params.bbsplit_fasta_list) {
+            error "Please provide --bbsplit_fasta_list (CSV of name,fasta_path rows for contaminant genomes) when --perform_bbsplit is true."
+        }
+        if (!params.fasta) {
+            error "Please provide --fasta (the primary/target genome) when --perform_bbsplit is true."
+        }
+
+        // Small, static reference list — read directly with Groovy
+        // rather than through a Nextflow channel, since it's the same
+        // for every sample and known up front, not per-sample data.
+        def other_refs = []
+        file(params.bbsplit_fasta_list, checkIfExists: true).eachLine { line ->
+            def (name, fasta_path) = line.tokenize(',')
+            other_refs << [ name, file(fasta_path, checkIfExists: true) ]
+        }
+
+        BBMAP_BBSPLIT(
+            ch_trimmed_reads,
+            [], // index: none pre-built, build on-the-fly from the fastas below
+            file(params.fasta, checkIfExists: true), // primary_ref: the human genome
+            [ other_refs.collect { it[0] }, other_refs.collect { it[1] } ], // other_ref_names, other_ref_paths
+            false, // only_build_index: also split reads, not just build the index
+        )
+
+        ch_filtered_reads = BBMAP_BBSPLIT.out.primary_fastq
+        ch_multiqc_files = ch_multiqc_files.mix(BBMAP_BBSPLIT.out.stats.map{ _meta, file -> file })
+    }
+
+    // ── STEP 5: SortMeRNA ──────────────────────────────────────
+    // Ribosomal RNA depletion. 
 
     //
     // Collate and save software versions

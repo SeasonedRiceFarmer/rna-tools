@@ -74,6 +74,21 @@
                     "description": "Path to GTF annotation file.",
                     "fa_icon": "far fa-file-code"
                 },
+                "perform_bbsplit": {
+                    "type": "boolean",
+                    "description": "Whether to run BBSplit to screen reads against contaminant genomes (e.g. bacteria/fungi/virus) before downstream analysis.",
+                    "fa_icon": "fas fa-filter",
+                    "help_text": "Requires `--bbsplit_fasta_list` and `--fasta` to also be set."
+                },
+                "bbsplit_fasta_list": {
+                    "type": "string",
+                    "format": "file-path",
+                    "exists": true,
+                    "mimetype": "text/csv",
+                    "description": "Path to a CSV file of `name,fasta_path` rows, one per contaminant genome to screen reads against with BBSplit.",
+                    "fa_icon": "far fa-file-code",
+                    "help_text": "Only used when `--perform_bbsplit` is set. The primary genome (`--fasta`) does not need to be listed here — it is used automatically as the target reference."
+                },
                 "igenomes_ignore": {
                     "type": "boolean",
                     "description": "Do not load the iGenomes reference config.",
