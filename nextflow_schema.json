@@ -74,11 +74,50 @@
                     "description": "Path to GTF annotation file.",
                     "fa_icon": "far fa-file-code"
                 },
+                "run_kraken2": {
+                    "type": "boolean",
+                    "description": "Classify trimmed reads with Kraken2 to detect non-human (bacteria/fungi/virus) taxa present in the sample.",
+                    "fa_icon": "fas fa-search",
+                    "help_text": "Requires `--kraken2_db`. Detected taxa above the abundance/read-count thresholds are automatically added to BBSplit's contaminant screen when `--perform_bbsplit` is also set."
+                },
+                "kraken2_db": {
+                    "type": "string",
+                    "format": "directory-path",
+                    "exists": true,
+                    "description": "Path to a Kraken2 database (e.g. PlusPF). Required when `--run_kraken2` is set.",
+                    "fa_icon": "fas fa-database"
+                },
+                "kraken2_confidence": {
+                    "type": "number",
+                    "default": 0.1,
+                    "description": "Kraken2 `--confidence` threshold; cuts spurious low-confidence classifications.",
+                    "fa_icon": "fas fa-percent"
+                },
+                "kraken2_min_rel_abundance": {
+                    "type": "number",
+                    "default": 0.005,
+                    "description": "Minimum fraction of a sample's total reads a taxon must reach (from Kraken2's report) to be treated as a real contaminant.",
+                    "fa_icon": "fas fa-percent"
+                },
+                "kraken2_min_reads": {
+                    "type": "integer",
+                    "default": 100,
+                    "description": "Minimum absolute read count a taxon must reach (from Kraken2's report) to be treated as a real contaminant, avoiding noisy percentages at low depth.",
+                    "fa_icon": "fas fa-hashtag"
+                },
+                "kraken2_taxid_lookup": {
+                    "type": "string",
+                    "format": "file-path",
+                    "exists": true,
+                    "mimetype": "text/csv",
+                    "description": "Path to a CSV of `taxid,name,fasta_path` rows mapping Kraken2 taxids to reference genomes, used to resolve detected contaminants for BBSplit.",
+                    "fa_icon": "far fa-file-code"
+                },
                 "perform_bbsplit": {
                     "type": "boolean",
                     "description": "Whether to run BBSplit to screen reads against contaminant genomes (e.g. bacteria/fungi/virus) before downstream analysis.",
                     "fa_icon": "fas fa-filter",
-                    "help_text": "Requires `--bbsplit_fasta_list` and `--fasta` to also be set."
+                    "help_text": "Requires `--fasta`, and at least one of `--bbsplit_fasta_list` or `--run_kraken2` to supply contaminant genomes."
                 },
                 "bbsplit_fasta_list": {
                     "type": "string",
