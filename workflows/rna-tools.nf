@@ -133,7 +133,7 @@ workflow RNA_TOOLS {
 
         KRAKEN2_KRAKEN2(
             ch_trimmed_reads,
-            file(params.kraken2_db, checkIfExists: true),
+            file(params.kraken2_db, checkIfExists: true), // resolves path
             false, // save_output_fastqs: we only need the report, not classified/unclassified fastqs
             false, // save_reads_assignment: don't need the per-read taxid assignment file
         )
@@ -161,7 +161,7 @@ workflow RNA_TOOLS {
                         def reads_clade = cols[1].trim() as Integer
                         def rank_code   = cols[3].trim()
                         def taxid       = cols[4].trim()
-                        rank_code.startsWith('S') && taxid != '9606' &&
+                        rank_code.startsWith('S') && taxid != '9606' && // human TaxID
                             percent >= (params.kraken2_min_rel_abundance * 100) && reads_clade >= params.kraken2_min_reads
                     }
                     .collect { line -> line.tokenize('\t')[4].trim() }
@@ -259,8 +259,39 @@ workflow RNA_TOOLS {
         ch_multiqc_files = ch_multiqc_files.mix(BBMAP_BBSPLIT.out.stats.map{ _meta, file -> file })
     }
 
-    // ── STEP 5: SortMeRNA ──────────────────────────────────────
-    // Ribosomal RNA depletion. 
+    // ── STEP 6: SortMeRNA (optional) ────────────────────────
+    // Ribosomal RNA depletion. Aligns reads against known rRNA
+    // reference sequences (--ribo_database_manifest: a text file
+    // listing one rRNA fasta path per line, e.g. the SILVA/rfam
+    // set nf-core/rnaseq ships) and keeps only the non-rRNA reads.
+    // Runs after BBSplit so index/filtering only sees reads already
+    // narrowed down to the primary genome. Off by default: needs
+    // --ribo_database_manifest when enabled.
+
+    if (params.remove_ribo_rna) {
+        if (!params.ribo_database_manifest) {
+            error "Please provide --ribo_database_manifest (path to a text file listing rRNA reference fasta paths, one per line) when --remove_ribo_rna is true."
+        }
+
+        // Same "read once, reuse across every sample" shape as the
+        // BBSplit reference list above: one shared set of rRNA fastas
+        // for the whole run, not per-sample data.
+        ch_sortmerna_fastas = channel.fromPath(params.ribo_database_manifest, checkIfExists: true)
+            .splitCsv()
+            .flatten()
+            .map { fasta_path -> file(fasta_path.trim(), checkIfExists: true) }
+            .collect()
+            .map { fastas -> [ [], fastas ] }
+
+        SORTMERNA(
+            ch_filtered_reads,
+            ch_sortmerna_fastas,
+            [ [], [] ], // index: none pre-built, build on-the-fly from the fastas above
+        )
+
+        ch_filtered_reads = SORTMERNA.out.reads
+        ch_multiqc_files = ch_multiqc_files.mix(SORTMERNA.out.log.map{ _meta, file -> file })
+    }
 
     //
     // Collate and save software versions

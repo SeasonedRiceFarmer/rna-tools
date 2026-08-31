@@ -128,6 +128,20 @@
                     "fa_icon": "far fa-file-code",
                     "help_text": "Only used when `--perform_bbsplit` is set. The primary genome (`--fasta`) does not need to be listed here — it is used automatically as the target reference."
                 },
+                "remove_ribo_rna": {
+                    "type": "boolean",
+                    "description": "Run SortMeRNA to remove ribosomal RNA reads.",
+                    "fa_icon": "fas fa-filter",
+                    "help_text": "Requires `--ribo_database_manifest`. Runs after BBSplit (if enabled), filtering out reads that align to the given rRNA reference sequences."
+                },
+                "ribo_database_manifest": {
+                    "type": "string",
+                    "format": "file-path",
+                    "exists": true,
+                    "mimetype": "text/plain",
+                    "description": "Path to a text file listing rRNA reference fasta paths, one per line. Required when `--remove_ribo_rna` is set.",
+                    "fa_icon": "far fa-file-code"
+                },
                 "igenomes_ignore": {
                     "type": "boolean",
                     "description": "Do not load the iGenomes reference config.",
