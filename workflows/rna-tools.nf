@@ -112,6 +112,15 @@ workflow RNA_TOOLS {
     // --bbsplit_fasta_list. Off by default: needs a large pre-built
     // Kraken2 DB (e.g. PlusPF).
 
+    // Note: Genome-based Kraken2 DB causes high unclassified rate (~90%) on
+    // RNA-seq reads. Introns aren't on the RNA, so Kraken2's k-mer matchin
+    // fails to identify it even though they are valid human sequence.  
+    // This is expected, not a bug — a transcript-inclusive DB would fix it, but it doesn't 
+    // matter here: contaminant taxa (bacterial/viral) still classify correctly and
+    // clear the 0.5%/100-read threshold regardless of the unclassified rate.
+    // Only skip this if you need the report itself to be human-readable/
+    // interpretable as a standalone QC metric.
+
     // Per-sample taxids that clear both thresholds (rel. abundance
     // of total reads + absolute read count); empty channel when
     // Kraken2 didn't run, which .collect() below still resolves to [].
