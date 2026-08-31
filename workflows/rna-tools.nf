@@ -5,6 +5,7 @@
 */
 include { FASTQC                 } from '../modules/nf-core/fastqc/main'
 include { FASTQC as FASTQC_TRIMMED } from '../modules/nf-core/fastqc/main'
+include { UMITOOLS_EXTRACT       } from '../modules/nf-core/umitools/extract/main'
 include { FASTP                  } from '../modules/nf-core/fastp/main'
 include { BBMAP_BBSPLIT          } from '../modules/nf-core/bbmap/bbsplit/main'
 include { KRAKEN2_KRAKEN2        } from '../modules/nf-core/kraken2/kraken2/main'
@@ -51,15 +52,38 @@ workflow RNA_TOOLS {
     // just the file paths. Note: mix combines emissions 
     ch_multiqc_files = ch_multiqc_files.mix(FASTQC.out.zip.map{ _meta, file -> file })
 
+    // ── STEP 2: UMI-tools extract (optional) ────────────────
+    // Pulls the UMI (Unique Molecular Identifier) barcode out of the
+    // read sequence/name — per --umitools_bc_pattern (and
+    // --umitools_bc_pattern2 for read 2) — and moves it into the read
+    // header, where fastp/the aligner won't mistake it for biological
+    // sequence. Must run on raw reads, before trimming: trimming can
+    // clip or shift the UMI before extraction ever sees it.
+    // Extraction/correction only — dedup needs alignment first, and
+    // isn't wired up yet. Off by default: needs --umitools_bc_pattern.
+
+    ch_reads_for_trimming = ch_samplesheet
+
+    if (params.extract_umi) {
+        if (!params.umitools_bc_pattern) {
+            error "Please provide --umitools_bc_pattern (e.g. 'NNNNNN' for a 6bp 5' UMI) when --extract_umi is true."
+        }
+
+        UMITOOLS_EXTRACT(ch_samplesheet)
+
+        ch_reads_for_trimming = UMITOOLS_EXTRACT.out.reads
+        ch_multiqc_files = ch_multiqc_files.mix(UMITOOLS_EXTRACT.out.log.map{ _meta, file -> file })
+    }
+
     // Build fastp's input tuple: [meta, reads, adapter_fasta].
     // Empty list = no adapter file, fastp auto-detects adapters.
     // TODO: expose adapter_fasta as an optional pipeline param
-    ch_fastp_input = ch_samplesheet.map { meta, reads -> [ meta, reads, [] ] }
+    ch_fastp_input = ch_reads_for_trimming.map { meta, reads -> [ meta, reads, [] ] }
 
     // TODO: Optional view for learning, marked for removal.
     ch_fastp_input.view()
 
-    // ── STEP 2: FASTP ──────────────────────────────────────
+    // ── STEP 3: FASTP ──────────────────────────────────────
     // Independent to FastQC, this is the trimming step for raw reads.
     // What it does:
     //   - Clips adapter contamination off read ends; purely
@@ -89,7 +113,7 @@ workflow RNA_TOOLS {
     // Updates the channel so that the channel can later be given to MultiQC. (Fastp JSON report)
     ch_multiqc_files = ch_multiqc_files.mix(FASTP.out.json.map{ _meta, file -> file })
 
-    // ── STEP 3: FASTQC ──────────────────────────────────────
+    // ── STEP 4: FASTQC ──────────────────────────────────────
     // FastQC again to verify Fastp successfully trimmed
     // for higher quality.
 
@@ -103,11 +127,11 @@ workflow RNA_TOOLS {
 
     ch_multiqc_files = ch_multiqc_files.mix(FASTQC_TRIMMED.out.zip.map{ _meta, file -> file })
 
-    // ── STEP 4: Kraken2 (optional) ──────────────────────────
+    // ── STEP 5: Kraken2 (optional) ──────────────────────────
     // Classifies trimmed reads against a broad reference DB to see
     // which non-human taxa (bacteria/fungi/virus) are actually
     // present in each sample. Its report doesn't remove anything by
-    // itself — it just tells STEP 5 (BBSplit) which extra genomes
+    // itself — it just tells STEP 6 (BBSplit) which extra genomes
     // are worth screening against, on top of whatever's already in
     // --bbsplit_fasta_list. Off by default: needs a large pre-built
     // Kraken2 DB (e.g. PlusPF).
@@ -171,7 +195,7 @@ workflow RNA_TOOLS {
         ch_kraken2_taxids.view { taxid -> "[kraken2] taxid cleared both thresholds: ${taxid}" }
     }
 
-    // ── STEP 5: BBSplit (optional) ──────────────────────────
+    // ── STEP 6: BBSplit (optional) ──────────────────────────
     // Screens trimmed reads against extra "contaminant" genomes
     // (bacteria/fungi/virus) alongside the primary human genome,
     // and keeps only the reads that best match the human genome.
@@ -259,7 +283,7 @@ workflow RNA_TOOLS {
         ch_multiqc_files = ch_multiqc_files.mix(BBMAP_BBSPLIT.out.stats.map{ _meta, file -> file })
     }
 
-    // ── STEP 6: SortMeRNA (optional) ────────────────────────
+    // ── STEP 7: SortMeRNA (optional) ────────────────────────
     // Ribosomal RNA depletion. Aligns reads against known rRNA
     // reference sequences (--ribo_database_manifest: a text file
     // listing one rRNA fasta path per line, e.g. the SILVA/rfam

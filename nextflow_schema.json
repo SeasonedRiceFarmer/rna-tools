@@ -142,6 +142,27 @@
                     "description": "Path to a text file listing rRNA reference fasta paths, one per line. Required when `--remove_ribo_rna` is set.",
                     "fa_icon": "far fa-file-code"
                 },
+                "extract_umi": {
+                    "type": "boolean",
+                    "description": "Run UMI-tools extract to pull UMI barcodes out of the read sequence/name into the read header.",
+                    "fa_icon": "fas fa-barcode",
+                    "help_text": "Requires `--umitools_bc_pattern`. Runs on raw reads, before trimming. Only extraction/correction — deduplication after alignment is not yet implemented."
+                },
+                "umitools_bc_pattern": {
+                    "type": "string",
+                    "description": "UMI-tools barcode pattern for read 1 (e.g. `NNNNNN` for a 6bp UMI at the 5' end). Required when `--extract_umi` is set.",
+                    "fa_icon": "fas fa-i-cursor"
+                },
+                "umitools_bc_pattern2": {
+                    "type": "string",
+                    "description": "UMI-tools barcode pattern for read 2 of paired-end data, if it also carries a UMI.",
+                    "fa_icon": "fas fa-i-cursor"
+                },
+                "umitools_umi_separator": {
+                    "type": "string",
+                    "description": "Separator character used if the UMI is already embedded in the read name (e.g. `_` or `:`) rather than the sequence.",
+                    "fa_icon": "fas fa-i-cursor"
+                },
                 "igenomes_ignore": {
                     "type": "boolean",
                     "description": "Do not load the iGenomes reference config.",
