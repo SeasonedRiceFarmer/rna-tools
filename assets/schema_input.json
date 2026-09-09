@@ -26,6 +26,15 @@
                 "exists": true,
                 "pattern": "^([\\S\\s]*\\/)?[^\\s\\/]+\\.f(ast)?q\\.gz$",
                 "errorMessage": "FastQ file for reads 2 cannot contain spaces and must have extension '.fq.gz' or '.fastq.gz'"
+            },
+            "vcf": {
+                "type": "string",
+                "format": "file-path",
+                "exists": true,
+                "pattern": "^([\\S\\s]*\\/)?[^\\s\\/]+\\.vcf(\\.gz)?$",
+                "errorMessage": "Phased VCF must have extension '.vcf' or '.vcf.gz' and cannot contain spaces",
+                "description": "This patient's own genotyped VCF, used for STAR's WASP filter and phASER downstream. WASP needs only the GT field (heterozygous SNVs), not phasing; phASER downstream does need it phased. Optional; only read when --wasp_ase is set.",
+                "meta": ["vcf"]
             }
         },
         "required": ["sample", "fastq_1"]

@@ -74,6 +74,31 @@
                     "description": "Path to GTF annotation file.",
                     "fa_icon": "far fa-file-code"
                 },
+                "star_index": {
+                    "type": "string",
+                    "format": "directory-path",
+                    "exists": true,
+                    "description": "Path to a pre-built STAR index directory. If not set, one is built from `--fasta` and `--gtf`.",
+                    "fa_icon": "fas fa-bezier-curve",
+                    "help_text": "The index must have been built from the same FASTA/GTF pair passed to this run — STAR does not validate this, and a mismatched index produces silently wrong coordinates. Building an index for GRCh38 takes roughly an hour and ~32GB RAM, so combine with `--save_reference` on a first run and reuse the result afterwards."
+                },
+                "star_ignore_sjdbgtf": {
+                    "type": "boolean",
+                    "description": "Do not pass the GTF to STAR at alignment time; rely on the splice junctions already built into the index.",
+                    "fa_icon": "fas fa-ban",
+                    "help_text": "Only set this if the supplied `--star_index` was built without a GTF, or you deliberately want to avoid on-the-fly junction insertion."
+                },
+                "save_reference": {
+                    "type": "boolean",
+                    "description": "Publish the generated STAR index to `<outdir>/genome/` so it can be reused with `--star_index` on later runs.",
+                    "fa_icon": "fas fa-save"
+                },
+                "wasp_ase": {
+                    "type": "boolean",
+                    "description": "Run STAR's WASP filter to remove reads whose alignment is biased toward the reference allele.",
+                    "fa_icon": "fas fa-balance-scale",
+                    "help_text": "Required for trustworthy allele-specific expression downstream in phASER. Needs each sample to supply its own genotyped VCF via the `vcf` column of `--input`; the pipeline errors out if a sample is missing one. WASP itself only reads the `GT` field to find heterozygous SNVs — phasing is not required for this step (phASER downstream is what needs the VCF phased)."
+                },
                 "run_kraken2": {
                     "type": "boolean",
                     "description": "Classify trimmed reads with Kraken2 to detect non-human (bacteria/fungi/virus) taxa present in the sample.",

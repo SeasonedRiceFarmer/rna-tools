@@ -11,6 +11,11 @@ include { BBMAP_BBSPLIT          } from '../modules/nf-core/bbmap/bbsplit/main'
 include { KRAKEN2_KRAKEN2        } from '../modules/nf-core/kraken2/kraken2/main'
 include { MULTIQC                } from '../modules/nf-core/multiqc/main'
 include { SORTMERNA                } from '../modules/nf-core/sortmerna/main'
+include { GUNZIP as GUNZIP_FASTA } from '../modules/nf-core/gunzip/main'
+include { GUNZIP as GUNZIP_GTF   } from '../modules/nf-core/gunzip/main'
+include { STAR_GENOMEGENERATE    } from '../modules/nf-core/star/genomegenerate/main'
+include { GUNZIP as GUNZIP_VCF   } from '../modules/nf-core/gunzip/main'
+include { STAR_ALIGN_WASP        } from '../modules/local/star_align_wasp/main'
 
 include { paramsSummaryMap       } from 'plugin/nf-schema'
 include { paramsSummaryMultiqc   } from '../subworkflows/nf-core/utils_nfcore_pipeline'
@@ -316,6 +321,160 @@ workflow RNA_TOOLS {
         ch_filtered_reads = SORTMERNA.out.reads
         ch_multiqc_files = ch_multiqc_files.mix(SORTMERNA.out.log.map{ _meta, file -> file })
     }
+
+    // ── STEP 8: STAR alignment ──────────────────────────────
+    // First step that stops treating reads as free-floating strings
+    // and asks "where in the genome did this come from?". STAR is a
+    // splice-aware aligner: an RNA read can span an exon-exon
+    // junction, so a chunk of it matches one place and the rest
+    // matches thousands of bases downstream, with the intron skipped
+    // in between. DNA aligners (bwa) would just soft-clip that read;
+    // STAR is built to split it across the junction, which is exactly
+    // what we need for a splicing-focused rare-disease pipeline.
+    //
+    // Two files come out of this that the rest of the pipeline needs:
+    //   - genome BAM  (Aligned.sortedByCoord.out.bam) — reads placed on
+    //     genomic coordinates. This is what phASER reads for ASE, and
+    //     what UMI-tools dedup will run on once it's wired up.
+    //   - transcriptome BAM (Aligned.toTranscriptome.out.bam) — the same
+    //     reads re-expressed in transcript coordinates, which is what
+    //     Salmon consumes in alignment-based mode. Produced by
+    //     --quantMode TranscriptomeSAM (see conf/modules.config), NOT a
+    //     second alignment run.
+    //
+    // WASP (--wasp_ase) is the third thing this step does, and the reason
+    // alignment has to happen at all rather than pseudoaligning: see the
+    // ch_wasp_vcf block below.
+
+    if (!params.fasta) {
+        error "Please provide --fasta (reference genome) — STAR alignment needs it, either to build an index or alongside a pre-built --star_index."
+    }
+    if (!params.gtf) {
+        error "Please provide --gtf (gene annotation) — STAR needs it to know where the splice junctions are, and Salmon downstream needs the same annotation."
+    }
+
+    // STAR reads the genome fasta and GTF with plain file I/O — unlike
+    // fastq inputs (where --readFilesCommand zcat handles it), there's
+    // no decompress-on-read hook for the reference. A .gz here doesn't
+    // error cleanly either; STAR/samtools faidx just choke on the
+    // binary. So decompress up front when needed.
+    //
+    // Both start as VALUE channels, which matters more than it looks:
+    // a queue channel is consumed as it's read, so the first sample
+    // would take the reference and every sample after it would hang
+    // waiting for a second emission that never comes. A value channel
+    // re-emits the same item to every sample instead. (Same class of
+    // trap as toList() vs collect() up in BBSplit.)
+    //
+    // No .first() is needed after GUNZIP/STAR_GENOMEGENERATE below:
+    // Nextflow infers a process's output as a value channel when ALL
+    // its inputs were value channels, which is the case here. Verified
+    // with a 2-sample run — one index build, both samples aligned.
+    ch_genome_fasta = channel.value([ [id: 'genome'], file(params.fasta, checkIfExists: true) ])
+    ch_genome_gtf   = channel.value([ [id: 'genome'], file(params.gtf,   checkIfExists: true) ])
+
+    if (params.fasta.endsWith('.gz')) {
+        GUNZIP_FASTA(ch_genome_fasta)
+        ch_genome_fasta = GUNZIP_FASTA.out.gunzip
+    }
+    if (params.gtf.endsWith('.gz')) {
+        GUNZIP_GTF(ch_genome_gtf)
+        ch_genome_gtf = GUNZIP_GTF.out.gunzip
+    }
+
+    // The index is the genome pre-chewed into STAR's suffix-array
+    // structure, plus the GTF's splice junctions baked in. Building it
+    // for a full human genome is the single most expensive step in the
+    // pipeline (~1h, ~32GB RAM), and the result depends only on the
+    // fasta+GTF pair — not on any sample. So: build once, reuse for
+    // every sample in the run, and let --star_index skip it entirely
+    // when one already exists on disk.
+    //
+    // NOTE: an index is only valid for the exact fasta it was built
+    // from. Swapping in a patient-specific genome later means a
+    // matching index — see the params.star_index note in nextflow.config.
+    if (params.star_index) {
+        ch_star_index = channel.value([ [id: 'star'], file(params.star_index, checkIfExists: true) ])
+    } else {
+        STAR_GENOMEGENERATE(ch_genome_fasta, ch_genome_gtf)
+        ch_star_index = STAR_GENOMEGENERATE.out.index
+    }
+
+    // ── WASP: reference-allele mapping bias ─────────────────
+    // The problem it solves: the reference genome carries one allele at
+    // every het site. A read carrying the OTHER allele has one extra
+    // mismatch, so it aligns very slightly worse — sometimes badly enough
+    // to be filtered or placed elsewhere. Aggregate that over a gene and
+    // the reference allele looks systematically over-expressed. phASER
+    // would happily report that artefact as allele-specific expression.
+    //
+    // WASP's fix: for every read overlapping a het site in the patient's
+    // VCF, swap the allele, re-map, and check the read still lands in the
+    // same place. Reads that move are flagged (vW tag) and dropped
+    // downstream. It's a filter on mapping, not on biology — which is why
+    // it needs the patient's OWN variants, not a population VCF.
+    //
+    // NOT a phasing step, and it does not need a phased VCF. STAR reads
+    // the GT field, takes the heterozygous SNVs, and swaps alleles one
+    // site at a time — which haplotype an allele belongs to never enters
+    // the calculation. 0/1 and 0|1 produce byte-identical BAMs (verified).
+    // phASER downstream is what actually needs the phasing; in practice
+    // the same trio-phased VCF feeds both, but for different reasons.
+    //
+    // Per-sample by construction: the VCF comes from the samplesheet's
+    // `vcf` column (folded into meta by assets/schema_input.json), so
+    // each patient is filtered against their own het sites.
+    ch_wasp_vcf = ch_filtered_reads.map { meta, _reads -> [ meta, [] ] }
+
+    if (params.wasp_ase) {
+        // STAR reads the VCF as plain text — a bgzipped VCF is not
+        // rejected with a clear message, STAR just fails to parse any
+        // variants and silently filters nothing. So decompress first.
+        ch_wasp_vcf_raw = ch_filtered_reads
+            .map { meta, _reads ->
+                if (!meta.vcf) {
+                    error "Sample '${meta.id}' has no `vcf` column value in --input, but --wasp_ase is true. WASP needs that patient's own genotyped VCF (a GT field with het SNVs; phasing is not required here); drop --wasp_ase to align without bias correction."
+                }
+                [ meta, file(meta.vcf, checkIfExists: true) ]
+            }
+            .branch { _meta, vcf ->
+                gzipped: vcf.name.endsWith('.gz')
+                plain: true
+            }
+
+        GUNZIP_VCF(ch_wasp_vcf_raw.gzipped)
+
+        ch_wasp_vcf = ch_wasp_vcf_raw.plain.mix(GUNZIP_VCF.out.gunzip)
+    }
+
+    // join on the meta map so each sample's reads meet its own VCF, and a
+    // mismatch fails loudly rather than pairing the wrong patient's
+    // variants with the wrong reads (which join by position would do).
+    ch_star_input = ch_filtered_reads.join(ch_wasp_vcf, failOnMismatch: true, failOnDuplicate: true)
+
+    STAR_ALIGN_WASP(
+        ch_star_input.map { meta, reads, _vcf -> [ meta, reads ] }, // whatever survived trimming + the optional BBSplit/SortMeRNA filters
+        ch_star_index,
+        ch_genome_gtf,
+        ch_star_input.map { meta, _reads, vcf -> [ meta, vcf ] },
+        params.star_ignore_sjdbgtf, // true = ignore the GTF at align time and rely purely on the index's baked-in junctions
+    )
+
+    // Genome-coordinate BAM: phASER (ASE) and UMI-tools dedup input.
+    ch_genome_bam = STAR_ALIGN_WASP.out.bam_sorted_aligned
+
+    // Transcript-coordinate BAM: Salmon quantification input.
+    // TODO: STEP 9 — Salmon quant, consuming ch_transcriptome_bam.
+    ch_transcriptome_bam = STAR_ALIGN_WASP.out.bam_transcript
+
+    // TODO: Optional views for learning, marked for removal.
+    ch_genome_bam.view { meta, bam -> "[star] genome BAM for ${meta.id}: ${bam}" }
+    ch_transcriptome_bam.view { meta, bam -> "[star] transcriptome BAM for ${meta.id}: ${bam}" }
+
+    // Log.final.out is STAR's mapping-rate summary (uniquely mapped %,
+    // multimappers, reads lost to being too short) — the single most
+    // informative QC number in the whole run, so it goes to MultiQC.
+    ch_multiqc_files = ch_multiqc_files.mix(STAR_ALIGN_WASP.out.log_final.map{ _meta, file -> file })
 
     //
     // Collate and save software versions
