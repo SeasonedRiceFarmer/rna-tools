@@ -16,6 +16,10 @@ include { GUNZIP as GUNZIP_GTF   } from '../modules/nf-core/gunzip/main'
 include { STAR_GENOMEGENERATE    } from '../modules/nf-core/star/genomegenerate/main'
 include { GUNZIP as GUNZIP_VCF   } from '../modules/nf-core/gunzip/main'
 include { STAR_ALIGN_WASP        } from '../modules/local/star_align_wasp/main'
+include { SAMTOOLS_INDEX as SAMTOOLS_INDEX_STAR  } from '../modules/nf-core/samtools/index/main'
+include { UMITOOLS_DEDUP         } from '../modules/nf-core/umitools/dedup/main'
+include { SAMTOOLS_INDEX as SAMTOOLS_INDEX_DEDUP } from '../modules/nf-core/samtools/index/main'
+include { BAM_KEEP_READNAMES     } from '../modules/local/bam_keep_readnames/main'
 
 include { paramsSummaryMap       } from 'plugin/nf-schema'
 include { paramsSummaryMultiqc   } from '../subworkflows/nf-core/utils_nfcore_pipeline'
@@ -54,7 +58,7 @@ workflow RNA_TOOLS {
 
     // Collect FastQC's zip reports for the final MultiQC summary.
     // MultiQC reads zips directly, so no metadata needed here —
-    // just the file paths. Note: mix combines emissions 
+    // just the file paths. Note: mix combines emissions
     ch_multiqc_files = ch_multiqc_files.mix(FASTQC.out.zip.map{ _meta, file -> file })
 
     // ── STEP 2: UMI-tools extract (optional) ────────────────
@@ -64,8 +68,9 @@ workflow RNA_TOOLS {
     // header, where fastp/the aligner won't mistake it for biological
     // sequence. Must run on raw reads, before trimming: trimming can
     // clip or shift the UMI before extraction ever sees it.
-    // Extraction/correction only — dedup needs alignment first, and
-    // isn't wired up yet. Off by default: needs --umitools_bc_pattern.
+    // Extraction/correction only — dedup needs alignment first, so it
+    // happens in STEP 9, gated on this same flag. Off by default: needs
+    // --umitools_bc_pattern.
 
     ch_reads_for_trimming = ch_samplesheet
 
@@ -100,7 +105,7 @@ workflow RNA_TOOLS {
     // Outputs: cleaned FASTQ files (fed to STAR downstream) +
     // its own HTML/JSON report (pre vs post-trim stats), which
     // also gets collected into ch_multiqc_files.
-    // TODO: Add an option for "trim galore!" or other tools. 
+    // TODO: Add an option for "trim galore!" or other tools.
 
     FASTP(
         ch_fastp_input,
@@ -143,8 +148,8 @@ workflow RNA_TOOLS {
 
     // Note: Genome-based Kraken2 DB causes high unclassified rate (~90%) on
     // RNA-seq reads. Introns aren't on the RNA, so Kraken2's k-mer matchin
-    // fails to identify it even though they are valid human sequence.  
-    // This is expected, not a bug — a transcript-inclusive DB would fix it, but it doesn't 
+    // fails to identify it even though they are valid human sequence.
+    // This is expected, not a bug — a transcript-inclusive DB would fix it, but it doesn't
     // matter here: contaminant taxa (bacterial/viral) still classify correctly and
     // clear the 0.5%/100-read threshold regardless of the unclassified rate.
     // Only skip this if you need the report itself to be human-readable/
@@ -464,12 +469,70 @@ workflow RNA_TOOLS {
     ch_genome_bam = STAR_ALIGN_WASP.out.bam_sorted_aligned
 
     // Transcript-coordinate BAM: Salmon quantification input.
-    // TODO: STEP 9 — Salmon quant, consuming ch_transcriptome_bam.
+    // TODO: STEP 10 — Salmon quant, consuming ch_transcriptome_bam.
     ch_transcriptome_bam = STAR_ALIGN_WASP.out.bam_transcript
 
     // TODO: Optional views for learning, marked for removal.
     ch_genome_bam.view { meta, bam -> "[star] genome BAM for ${meta.id}: ${bam}" }
     ch_transcriptome_bam.view { meta, bam -> "[star] transcriptome BAM for ${meta.id}: ${bam}" }
+
+
+    // ── STEP 9: UMI-tools dedup (optional) ──────────────────
+    // The other half of STEP 2. Back then the UMI was only moved out of the
+    // sequence and parked in the read name; nothing had been deduplicated,
+    // because you can't tell a PCR duplicate from a genuinely re-sequenced
+    // fragment until you know where both reads landed. Now STAR has placed
+    // them, so: reads sharing an alignment position AND a UMI came from one
+    // original molecule amplified multiple times — keep one, drop the rest.
+    // Position alone would throw away real duplicate-position fragments,
+    // which is exactly what UMIs exist to prevent.
+    //
+    // Runs whenever STEP 2 ran (--extract_umi): if the UMIs were extracted,
+    // deduplicating on them is the whole point of having done so.
+    //
+    // Deduplication happens ONCE, here, on the genome BAM — then the same
+    // verdict is propagated to the transcriptome BAM by read name. Doing an
+    // independent dedup run on the transcriptome BAM would be a bug: its
+    // coordinates are per-transcript, so one fragment appears at a different
+    // position in every compatible isoform and "same UMI + same position"
+    // stops meaning what dedup thinks it means.
+
+    if (params.extract_umi) {
+        // umi_tools dedup does random access over the BAM, so it needs the
+        // .bai alongside it — STAR emits a sorted BAM but no index.
+        SAMTOOLS_INDEX_STAR(ch_genome_bam)
+
+        UMITOOLS_DEDUP(
+            ch_genome_bam.join(SAMTOOLS_INDEX_STAR.out.index, failOnMismatch: true, failOnDuplicate: true),
+            false, // get_output_stats: the per-UMI/edit-distance TSVs are slow and memory-hungry on real data; the .log already carries the counts MultiQC shows
+        )
+
+        ch_genome_bam = UMITOOLS_DEDUP.out.bam
+
+        // Index the deduplicated BAM too — this is the BAM phASER reads, and
+        // it needs random access by coordinate.
+        SAMTOOLS_INDEX_DEDUP(ch_genome_bam)
+
+        // Propagate the dedup verdict into transcript space for Salmon.
+        // meta-joined so a sample's transcriptome BAM is only ever filtered
+        // against its own surviving read names.
+        ch_dedup_pairs = ch_transcriptome_bam.join(ch_genome_bam, failOnMismatch: true, failOnDuplicate: true)
+
+        BAM_KEEP_READNAMES(
+            ch_dedup_pairs.map { meta, tx_bam, _genome_bam -> [ meta, tx_bam ] },
+            ch_dedup_pairs.map { meta, _tx_bam, genome_bam -> [ meta, genome_bam ] },
+        )
+
+        ch_transcriptome_bam = BAM_KEEP_READNAMES.out.bam
+
+        // MultiQC has a umitools/dedup section: reads in vs. out, i.e. the
+        // duplication rate the UMIs actually caught.
+        ch_multiqc_files = ch_multiqc_files.mix(UMITOOLS_DEDUP.out.log.map{ _meta, file -> file })
+
+        // TODO: Optional views for learning, marked for removal.
+        ch_genome_bam.view { meta, bam -> "[dedup] deduplicated genome BAM for ${meta.id}: ${bam}" }
+        ch_transcriptome_bam.view { meta, bam -> "[dedup] read-name-filtered transcriptome BAM for ${meta.id}: ${bam}" }
+    }
 
     // Log.final.out is STAR's mapping-rate summary (uniquely mapped %,
     // multimappers, reads lost to being too short) — the single most

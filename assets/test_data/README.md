@@ -25,5 +25,5 @@ laptop, instead of needing a full-size RNA-seq run and a full human genome index
 and fast to build on a laptop. This means most reads in the test data will **not**
 align — the highly-expressed whole-blood genes (e.g. hemoglobin `HBB`, `HBA1`, `HBA2`)
 are on chromosome 11 and 16, not 21. A low mapping rate here is expected and is not a
-bug. This test only checks that the pipeline *mechanism* works (files flow through
+bug. This test only checks that the pipeline _mechanism_ works (files flow through
 every step correctly) — it is not meant to produce biologically meaningful counts.
