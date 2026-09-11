@@ -20,6 +20,9 @@ include { SAMTOOLS_INDEX as SAMTOOLS_INDEX_STAR  } from '../modules/nf-core/samt
 include { UMITOOLS_DEDUP         } from '../modules/nf-core/umitools/dedup/main'
 include { SAMTOOLS_INDEX as SAMTOOLS_INDEX_DEDUP } from '../modules/nf-core/samtools/index/main'
 include { BAM_KEEP_READNAMES     } from '../modules/local/bam_keep_readnames/main'
+include { GFFREAD                } from '../modules/nf-core/gffread/main'
+include { GUNZIP as GUNZIP_TRANSCRIPT_FASTA } from '../modules/nf-core/gunzip/main'
+include { SALMON_QUANT           } from '../modules/nf-core/salmon/quant/main'
 
 include { paramsSummaryMap       } from 'plugin/nf-schema'
 include { paramsSummaryMultiqc   } from '../subworkflows/nf-core/utils_nfcore_pipeline'
@@ -468,8 +471,7 @@ workflow RNA_TOOLS {
     // Genome-coordinate BAM: phASER (ASE) and UMI-tools dedup input.
     ch_genome_bam = STAR_ALIGN_WASP.out.bam_sorted_aligned
 
-    // Transcript-coordinate BAM: Salmon quantification input.
-    // TODO: STEP 10 — Salmon quant, consuming ch_transcriptome_bam.
+    // Transcript-coordinate BAM: Salmon quantification input (STEP 10).
     ch_transcriptome_bam = STAR_ALIGN_WASP.out.bam_transcript
 
     // TODO: Optional views for learning, marked for removal.
@@ -538,6 +540,68 @@ workflow RNA_TOOLS {
     // multimappers, reads lost to being too short) — the single most
     // informative QC number in the whole run, so it goes to MultiQC.
     ch_multiqc_files = ch_multiqc_files.mix(STAR_ALIGN_WASP.out.log_final.map{ _meta, file -> file })
+
+
+    // ── STEP 10: Salmon quantification ──────────────────────
+    // Turns alignments into numbers: how much of each transcript was in the
+    // sample. The hard part isn't counting, it's that most reads are
+    // compatible with several isoforms of the same gene — a read from a
+    // shared exon can't tell you which isoform it came from. Salmon runs an
+    // EM over all reads at once: isoforms with reads at their unique regions
+    // get credit, and that in turn settles how the ambiguous shared-exon
+    // reads get apportioned. Counting reads per gene (STAR's ReadsPerGene)
+    // can't do that, and isoform-level resolution is the whole point for a
+    // splicing-focused rare-disease pipeline.
+    //
+    // ALIGNMENT-BASED mode (-a), not selective alignment: Salmon is handed
+    // STAR's transcriptome BAM instead of doing its own mapping. That's
+    // forced by the architecture — phASER needs real alignments anyway, so
+    // the BAM already exists, and reusing it means quantification and ASE
+    // are describing the exact same set of reads. When dedup ran (STEP 9),
+    // this is the read-name-filtered BAM, so PCR duplicates are already out.
+    //
+    // --libType A: strandedness is auto-detected per sample rather than
+    // declared up front, which is why no --strandedness param exists.
+    // The detected result lands in lib_format_counts.json — worth a look if
+    // a sample's mapping rate is unexpectedly bad.
+
+    // Salmon in alignment mode needs the actual transcript SEQUENCES: the
+    // BAM only names transcripts and gives coordinates, and Salmon needs
+    // each one's length and sequence composition for effective-length and
+    // bias correction. Default is to cut them out of the same fasta+GTF
+    // pair STAR indexed, which is what makes the transcript set provably
+    // identical to the BAM's headers — Salmon aborts if they disagree.
+    if (params.transcript_fasta) {
+        ch_transcript_fasta = channel.value([ [id: 'transcripts'], file(params.transcript_fasta, checkIfExists: true) ])
+        if (params.transcript_fasta.endsWith('.gz')) {
+            GUNZIP_TRANSCRIPT_FASTA(ch_transcript_fasta)
+            ch_transcript_fasta = GUNZIP_TRANSCRIPT_FASTA.out.gunzip
+        }
+        ch_transcript_fasta = ch_transcript_fasta.map { _meta, fasta -> fasta }
+    } else {
+        // gffread -w: splice each transcript's exons together and write the
+        // mature sequence. (See conf/modules.config for the flag.)
+        GFFREAD(ch_genome_gtf, ch_genome_fasta.map { _meta, fasta -> fasta })
+        ch_transcript_fasta = GFFREAD.out.gffread_fasta.map { _meta, fasta -> fasta }
+    }
+
+    SALMON_QUANT(
+        ch_transcriptome_bam,
+        [], // index: alignment mode reads the BAM, so there's no Salmon index to build or load
+        ch_genome_gtf.map { _meta, gtf -> gtf }, // --geneMap: also roll transcripts up to genes (quant.genes.sf), which is what deconvolution downstream wants
+        ch_transcript_fasta,
+        true, // alignment_mode
+        'A',  // lib_type: auto-detect strandedness per sample
+    )
+
+    ch_salmon_results = SALMON_QUANT.out.results
+
+    // TODO: Optional view for learning, marked for removal.
+    ch_salmon_results.view { meta, results -> "[salmon] quant dir for ${meta.id}: ${results}" }
+
+    // MultiQC reads meta_info.json out of the quant dir — mapping rate and
+    // the number of transcripts quantified.
+    ch_multiqc_files = ch_multiqc_files.mix(ch_salmon_results.map{ _meta, results -> results })
 
     //
     // Collate and save software versions

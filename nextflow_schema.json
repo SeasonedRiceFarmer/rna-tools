@@ -74,6 +74,16 @@
                     "description": "Path to GTF annotation file.",
                     "fa_icon": "far fa-file-code"
                 },
+                "transcript_fasta": {
+                    "type": "string",
+                    "format": "file-path",
+                    "exists": true,
+                    "mimetype": "text/plain",
+                    "pattern": "^\\S+\\.fn?a(sta)?(\\.gz)?$",
+                    "description": "Path to a FASTA file of transcript sequences, used by Salmon in alignment mode.",
+                    "fa_icon": "far fa-file-code",
+                    "help_text": "Optional. When unset, the transcript sequences are derived from `--fasta` and `--gtf` with gffread, which guarantees the transcript set matches the transcriptome BAM STAR produced. Supply your own only if it was built from the same annotation — Salmon aborts if the transcripts disagree with the BAM header."
+                },
                 "star_index": {
                     "type": "string",
                     "format": "directory-path",
