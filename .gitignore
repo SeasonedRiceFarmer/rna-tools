@@ -8,3 +8,6 @@ testing*
 *.pyc
 null/
 .lineage/
+claude.md*
+.nf-test/
+.nf-test.log

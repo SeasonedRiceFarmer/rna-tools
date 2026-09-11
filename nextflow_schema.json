@@ -74,6 +74,130 @@
                     "description": "Path to GTF annotation file.",
                     "fa_icon": "far fa-file-code"
                 },
+                "transcript_fasta": {
+                    "type": "string",
+                    "format": "file-path",
+                    "exists": true,
+                    "mimetype": "text/plain",
+                    "pattern": "^\\S+\\.fn?a(sta)?(\\.gz)?$",
+                    "description": "Path to a FASTA file of transcript sequences, used by Salmon in alignment mode.",
+                    "fa_icon": "far fa-file-code",
+                    "help_text": "Optional. When unset, the transcript sequences are derived from `--fasta` and `--gtf` with gffread, which guarantees the transcript set matches the transcriptome BAM STAR produced. Supply your own only if it was built from the same annotation — Salmon aborts if the transcripts disagree with the BAM header."
+                },
+                "star_index": {
+                    "type": "string",
+                    "format": "directory-path",
+                    "exists": true,
+                    "description": "Path to a pre-built STAR index directory. If not set, one is built from `--fasta` and `--gtf`.",
+                    "fa_icon": "fas fa-bezier-curve",
+                    "help_text": "The index must have been built from the same FASTA/GTF pair passed to this run — STAR does not validate this, and a mismatched index produces silently wrong coordinates. Building an index for GRCh38 takes roughly an hour and ~32GB RAM, so combine with `--save_reference` on a first run and reuse the result afterwards."
+                },
+                "star_ignore_sjdbgtf": {
+                    "type": "boolean",
+                    "description": "Do not pass the GTF to STAR at alignment time; rely on the splice junctions already built into the index.",
+                    "fa_icon": "fas fa-ban",
+                    "help_text": "Only set this if the supplied `--star_index` was built without a GTF, or you deliberately want to avoid on-the-fly junction insertion."
+                },
+                "save_reference": {
+                    "type": "boolean",
+                    "description": "Publish the generated STAR index to `<outdir>/genome/` so it can be reused with `--star_index` on later runs.",
+                    "fa_icon": "fas fa-save"
+                },
+                "wasp_ase": {
+                    "type": "boolean",
+                    "description": "Run STAR's WASP filter to remove reads whose alignment is biased toward the reference allele.",
+                    "fa_icon": "fas fa-balance-scale",
+                    "help_text": "Required for trustworthy allele-specific expression downstream in phASER. Needs each sample to supply its own genotyped VCF via the `vcf` column of `--input`; the pipeline errors out if a sample is missing one. WASP itself only reads the `GT` field to find heterozygous SNVs — phasing is not required for this step (phASER downstream is what needs the VCF phased)."
+                },
+                "run_kraken2": {
+                    "type": "boolean",
+                    "description": "Classify trimmed reads with Kraken2 to detect non-human (bacteria/fungi/virus) taxa present in the sample.",
+                    "fa_icon": "fas fa-search",
+                    "help_text": "Requires `--kraken2_db`. Detected taxa above the abundance/read-count thresholds are automatically added to BBSplit's contaminant screen when `--perform_bbsplit` is also set."
+                },
+                "kraken2_db": {
+                    "type": "string",
+                    "format": "directory-path",
+                    "exists": true,
+                    "description": "Path to a Kraken2 database (e.g. PlusPF). Required when `--run_kraken2` is set.",
+                    "fa_icon": "fas fa-database"
+                },
+                "kraken2_confidence": {
+                    "type": "number",
+                    "default": 0.1,
+                    "description": "Kraken2 `--confidence` threshold; cuts spurious low-confidence classifications.",
+                    "fa_icon": "fas fa-percent"
+                },
+                "kraken2_min_rel_abundance": {
+                    "type": "number",
+                    "default": 0.005,
+                    "description": "Minimum fraction of a sample's total reads a taxon must reach (from Kraken2's report) to be treated as a real contaminant.",
+                    "fa_icon": "fas fa-percent"
+                },
+                "kraken2_min_reads": {
+                    "type": "integer",
+                    "default": 100,
+                    "description": "Minimum absolute read count a taxon must reach (from Kraken2's report) to be treated as a real contaminant, avoiding noisy percentages at low depth.",
+                    "fa_icon": "fas fa-hashtag"
+                },
+                "kraken2_taxid_lookup": {
+                    "type": "string",
+                    "format": "file-path",
+                    "exists": true,
+                    "mimetype": "text/csv",
+                    "description": "Path to a CSV of `taxid,name,fasta_path` rows mapping Kraken2 taxids to reference genomes, used to resolve detected contaminants for BBSplit.",
+                    "fa_icon": "far fa-file-code"
+                },
+                "perform_bbsplit": {
+                    "type": "boolean",
+                    "description": "Whether to run BBSplit to screen reads against contaminant genomes (e.g. bacteria/fungi/virus) before downstream analysis.",
+                    "fa_icon": "fas fa-filter",
+                    "help_text": "Requires `--fasta`, and at least one of `--bbsplit_fasta_list` or `--run_kraken2` to supply contaminant genomes."
+                },
+                "bbsplit_fasta_list": {
+                    "type": "string",
+                    "format": "file-path",
+                    "exists": true,
+                    "mimetype": "text/csv",
+                    "description": "Path to a CSV file of `name,fasta_path` rows, one per contaminant genome to screen reads against with BBSplit.",
+                    "fa_icon": "far fa-file-code",
+                    "help_text": "Only used when `--perform_bbsplit` is set. The primary genome (`--fasta`) does not need to be listed here — it is used automatically as the target reference."
+                },
+                "remove_ribo_rna": {
+                    "type": "boolean",
+                    "description": "Run SortMeRNA to remove ribosomal RNA reads.",
+                    "fa_icon": "fas fa-filter",
+                    "help_text": "Requires `--ribo_database_manifest`. Runs after BBSplit (if enabled), filtering out reads that align to the given rRNA reference sequences."
+                },
+                "ribo_database_manifest": {
+                    "type": "string",
+                    "format": "file-path",
+                    "exists": true,
+                    "mimetype": "text/plain",
+                    "description": "Path to a text file listing rRNA reference fasta paths, one per line. Required when `--remove_ribo_rna` is set.",
+                    "fa_icon": "far fa-file-code"
+                },
+                "extract_umi": {
+                    "type": "boolean",
+                    "description": "Run UMI-tools extract to pull UMI barcodes out of the read sequence/name into the read header.",
+                    "fa_icon": "fas fa-barcode",
+                    "help_text": "Requires `--umitools_bc_pattern`. Runs on raw reads, before trimming. Only extraction/correction — deduplication after alignment is not yet implemented."
+                },
+                "umitools_bc_pattern": {
+                    "type": "string",
+                    "description": "UMI-tools barcode pattern for read 1 (e.g. `NNNNNN` for a 6bp UMI at the 5' end). Required when `--extract_umi` is set.",
+                    "fa_icon": "fas fa-i-cursor"
+                },
+                "umitools_bc_pattern2": {
+                    "type": "string",
+                    "description": "UMI-tools barcode pattern for read 2 of paired-end data, if it also carries a UMI.",
+                    "fa_icon": "fas fa-i-cursor"
+                },
+                "umitools_umi_separator": {
+                    "type": "string",
+                    "description": "Separator character used if the UMI is already embedded in the read name (e.g. `_` or `:`) rather than the sequence.",
+                    "fa_icon": "fas fa-i-cursor"
+                },
                 "igenomes_ignore": {
                     "type": "boolean",
                     "description": "Do not load the iGenomes reference config.",

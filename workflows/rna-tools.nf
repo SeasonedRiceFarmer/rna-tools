@@ -4,8 +4,26 @@
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 */
 include { FASTQC                 } from '../modules/nf-core/fastqc/main'
+include { FASTQC as FASTQC_TRIMMED } from '../modules/nf-core/fastqc/main'
+include { UMITOOLS_EXTRACT       } from '../modules/nf-core/umitools/extract/main'
 include { FASTP                  } from '../modules/nf-core/fastp/main'
+include { BBMAP_BBSPLIT          } from '../modules/nf-core/bbmap/bbsplit/main'
+include { KRAKEN2_KRAKEN2        } from '../modules/nf-core/kraken2/kraken2/main'
 include { MULTIQC                } from '../modules/nf-core/multiqc/main'
+include { SORTMERNA                } from '../modules/nf-core/sortmerna/main'
+include { GUNZIP as GUNZIP_FASTA } from '../modules/nf-core/gunzip/main'
+include { GUNZIP as GUNZIP_GTF   } from '../modules/nf-core/gunzip/main'
+include { STAR_GENOMEGENERATE    } from '../modules/nf-core/star/genomegenerate/main'
+include { GUNZIP as GUNZIP_VCF   } from '../modules/nf-core/gunzip/main'
+include { STAR_ALIGN_WASP        } from '../modules/local/star_align_wasp/main'
+include { SAMTOOLS_INDEX as SAMTOOLS_INDEX_STAR  } from '../modules/nf-core/samtools/index/main'
+include { UMITOOLS_DEDUP         } from '../modules/nf-core/umitools/dedup/main'
+include { SAMTOOLS_INDEX as SAMTOOLS_INDEX_DEDUP } from '../modules/nf-core/samtools/index/main'
+include { BAM_KEEP_READNAMES     } from '../modules/local/bam_keep_readnames/main'
+include { GFFREAD                } from '../modules/nf-core/gffread/main'
+include { GUNZIP as GUNZIP_TRANSCRIPT_FASTA } from '../modules/nf-core/gunzip/main'
+include { SALMON_QUANT           } from '../modules/nf-core/salmon/quant/main'
+
 include { paramsSummaryMap       } from 'plugin/nf-schema'
 include { paramsSummaryMultiqc   } from '../subworkflows/nf-core/utils_nfcore_pipeline'
 include { softwareVersionsToYAML } from '../subworkflows/nf-core/utils_nfcore_pipeline'
@@ -30,67 +48,560 @@ workflow RNA_TOOLS {
 
     def ch_versions = channel.empty()
     def ch_multiqc_files = channel.empty()
-    //
-    // MODULE: Run FastQC
-    //
-    // ch_samplesheet is built upstream (in PIPELINE_INITIALISATION, from your
-    // samplesheet.csv) and has the shape:
-    //     [ meta, reads ]
-    // where:
-    //   meta  = a Groovy map, e.g. [ id:'WHOLE_BLOOD_TEST', single_end:false ]
-    //   reads = a *list* of fastq.gz paths — one item if single-end, two if paired-end
-    // Every process below re-uses this same [ meta, reads ] shape as its input,
-    // and (almost) every process re-emits [ meta, <its own output files> ] so the
-    // metadata (sample id, single_end, later: condition/replicate info) travels
-    // alongside the data all the way through the pipeline instead of getting lost.
+
+    // Absurdly overcommented because I'm a high school chud who
+    // lowk dunno anything about this lmao.. for learning
+
+    // ── STEP 1: FASTQC ──────────────────────────────────────
+    // Reports raw read quality (per-base scores, GC content,
+    // adapter contamination, duplication) — diagnostic only,
+    // does not modify reads.
+
     FASTQC(ch_samplesheet)
+
+    // Collect FastQC's zip reports for the final MultiQC summary.
+    // MultiQC reads zips directly, so no metadata needed here —
+    // just the file paths. Note: mix combines emissions
     ch_multiqc_files = ch_multiqc_files.mix(FASTQC.out.zip.map{ _meta, file -> file })
 
-    //
-    // MODULE: Run fastp (adapter/quality trimming)
-    //
-    // FastQC only *looked* at the raw reads and wrote a report — it did not change
-    // any files. fastp is the step that actually edits the reads: it cuts adapter
-    // sequence off the ends, drops low-quality bases/reads, and writes new,
-    // cleaned fastq.gz files. STAR (added in the next step) will align these
-    // cleaned reads, not the raw ones.
-    //
-    // The FASTP module (modules/nf-core/fastp/main.nf) expects THREE things per
-    // sample instead of two:
-    //     tuple val(meta), path(reads), path(adapter_fasta)
-    // adapter_fasta lets you supply a known list of adapter sequences to trim.
-    // We pass an empty list [] for it, which tells fastp "auto-detect the adapter
-    // instead" — fastp is good at this, and it's the standard default. So we
-    // .map() over ch_samplesheet just to bolt an empty list onto each tuple.
-    ch_fastp_input = ch_samplesheet.map { meta, reads -> [ meta, reads, [] ] }
+    // ── STEP 2: UMI-tools extract (optional) ────────────────
+    // Pulls the UMI (Unique Molecular Identifier) barcode out of the
+    // read sequence/name — per --umitools_bc_pattern (and
+    // --umitools_bc_pattern2 for read 2) — and moves it into the read
+    // header, where fastp/the aligner won't mistake it for biological
+    // sequence. Must run on raw reads, before trimming: trimming can
+    // clip or shift the UMI before extraction ever sees it.
+    // Extraction/correction only — dedup needs alignment first, so it
+    // happens in STEP 9, gated on this same flag. Off by default: needs
+    // --umitools_bc_pattern.
 
-    // The three plain `false` arguments below are NOT per-sample data — they're
-    // single shared settings for every sample, matching how the module itself is
-    // written (input[1], input[2], input[3] in its test file):
-    //   discard_trimmed_pass : false = actually keep/emit the trimmed reads
-    //                          (if this were true, fastp would trim but not save them)
-    //   save_trimmed_fail    : false = don't bother keeping reads that failed QC
-    //   save_merged          : false = don't merge overlapping paired-end mates
-    //                          into one read (a feature for very short fragments;
-    //                          not relevant to standard RNA-seq)
+    ch_reads_for_trimming = ch_samplesheet
+
+    if (params.extract_umi) {
+        if (!params.umitools_bc_pattern) {
+            error "Please provide --umitools_bc_pattern (e.g. 'NNNNNN' for a 6bp 5' UMI) when --extract_umi is true."
+        }
+
+        UMITOOLS_EXTRACT(ch_samplesheet)
+
+        ch_reads_for_trimming = UMITOOLS_EXTRACT.out.reads
+        ch_multiqc_files = ch_multiqc_files.mix(UMITOOLS_EXTRACT.out.log.map{ _meta, file -> file })
+    }
+
+    // Build fastp's input tuple: [meta, reads, adapter_fasta].
+    // Empty list = no adapter file, fastp auto-detects adapters.
+    // TODO: expose adapter_fasta as an optional pipeline param
+    ch_fastp_input = ch_reads_for_trimming.map { meta, reads -> [ meta, reads, [] ] }
+
+    // TODO: Optional view for learning, marked for removal.
+    ch_fastp_input.view()
+
+    // ── STEP 3: FASTP ──────────────────────────────────────
+    // Independent to FastQC, this is the trimming step for raw reads.
+    // What it does:
+    //   - Clips adapter contamination off read ends; purely
+    //     statistical if no adapter_fasta is given.
+    //   - trims low-quality bases, typically from the 3' end where
+    //     quality tends to degrade first
+    //   - drops whole reads that are too short or too low-quality
+    //     after trimming to be usable
+    // Outputs: cleaned FASTQ files (fed to STAR downstream) +
+    // its own HTML/JSON report (pre vs post-trim stats), which
+    // also gets collected into ch_multiqc_files.
+    // TODO: Add an option for "trim galore!" or other tools.
+
     FASTP(
         ch_fastp_input,
-        false, // discard_trimmed_pass
-        false, // save_trimmed_fail
-        false, // save_merged
+        false, // discard_trimmed_pass: keep reads that failed trimming, don't silently drop them
+        false, // save_trimmed_fail: don't save a separate file of failed reads
+        false, // save_merged: don't merge overlapping PE reads into one combined read
     )
 
-    // FASTP.out.reads = [ meta, trimmed_reads ] — this is what STAR will consume next.
-    // We don't use it yet this step, but we name it here so it's obvious where the
-    // pipeline picks back up.
+    // What you get after trimming, fastp emitted to reads. Tuple of reads.
     ch_trimmed_reads = FASTP.out.reads
 
-    // fastp writes its own QC report as a .json file. MultiQC knows how to read
-    // fastp's json format natively, so we just add it to the same "pile of files"
-    // channel (ch_multiqc_files) that FastQC's output already goes into. MultiQC
-    // will scan every file in this pile at the end and figure out which tool made
-    // each one — we don't have to tell it explicitly.
+     // TODO: Optional view for learning, marked for removal.
+    ch_trimmed_reads.view()
+
+    // Updates the channel so that the channel can later be given to MultiQC. (Fastp JSON report)
     ch_multiqc_files = ch_multiqc_files.mix(FASTP.out.json.map{ _meta, file -> file })
+
+    // ── STEP 4: FASTQC ──────────────────────────────────────
+    // FastQC again to verify Fastp successfully trimmed
+    // for higher quality.
+
+    // Tag the meta.id with a "_trimmed" suffix so the output
+    // files (and thus filenames) are distinguishable from the
+    // raw FastQC run above — MultiQC groups by filename pattern,
+    // and both runs would otherwise collide in one section.
+    ch_fastqc_trimmed_input = ch_trimmed_reads.map { meta, reads -> [ meta + [id: "${meta.id}_trimmed"], reads ] }
+
+    FASTQC_TRIMMED(ch_fastqc_trimmed_input)
+
+    ch_multiqc_files = ch_multiqc_files.mix(FASTQC_TRIMMED.out.zip.map{ _meta, file -> file })
+
+    // ── STEP 5: Kraken2 (optional) ──────────────────────────
+    // Classifies trimmed reads against a broad reference DB to see
+    // which non-human taxa (bacteria/fungi/virus) are actually
+    // present in each sample. Its report doesn't remove anything by
+    // itself — it just tells STEP 6 (BBSplit) which extra genomes
+    // are worth screening against, on top of whatever's already in
+    // --bbsplit_fasta_list. Off by default: needs a large pre-built
+    // Kraken2 DB (e.g. PlusPF).
+
+    // Note: Genome-based Kraken2 DB causes high unclassified rate (~90%) on
+    // RNA-seq reads. Introns aren't on the RNA, so Kraken2's k-mer matchin
+    // fails to identify it even though they are valid human sequence.
+    // This is expected, not a bug — a transcript-inclusive DB would fix it, but it doesn't
+    // matter here: contaminant taxa (bacterial/viral) still classify correctly and
+    // clear the 0.5%/100-read threshold regardless of the unclassified rate.
+    // Only skip this if you need the report itself to be human-readable/
+    // interpretable as a standalone QC metric.
+
+    // Per-sample taxids that clear both thresholds (rel. abundance
+    // of total reads + absolute read count); empty channel when
+    // Kraken2 didn't run, which .collect() below still resolves to [].
+    ch_kraken2_taxids = channel.empty()
+
+    if (params.run_kraken2) {
+        if (!params.kraken2_db) {
+            error "Please provide --kraken2_db (path to a Kraken2 database) when --run_kraken2 is true."
+        }
+
+        KRAKEN2_KRAKEN2(
+            ch_trimmed_reads,
+            file(params.kraken2_db, checkIfExists: true), // resolves path
+            false, // save_output_fastqs: we only need the report, not classified/unclassified fastqs
+            false, // save_reads_assignment: don't need the per-read taxid assignment file
+        )
+
+        ch_multiqc_files = ch_multiqc_files.mix(KRAKEN2_KRAKEN2.out.report.map{ _meta, file -> file })
+
+        // TODO: Optional view for learning, marked for removal.
+        KRAKEN2_KRAKEN2.out.report.view { meta, report -> "[kraken2] report for ${meta.id}: ${report}" }
+
+        // Kraken2's report.txt is tab-separated with no header:
+        // percent_of_reads, reads_in_clade, reads_direct, rank_code, taxid, name
+        // The report has one row per taxonomic RANK, not just species — a
+        // human read rolls up through root/Eukaryota/Metazoa/.../Homo sapiens,
+        // and every one of those ancestor rows trivially clears any abundance
+        // threshold when most reads are human. Only rank_code 'S'-prefixed rows
+        // (species, or S1/S2 strain-level) are actual organisms with a genome
+        // worth screening for — and Homo sapiens (9606) is the host, not a
+        // contaminant, so it's excluded explicitly.
+        ch_kraken2_taxids = KRAKEN2_KRAKEN2.out.report
+            .flatMap { _meta, report ->
+                report.readLines()
+                    .findAll { line ->
+                        def cols = line.tokenize('\t')
+                        def percent     = cols[0].trim() as Double
+                        def reads_clade = cols[1].trim() as Integer
+                        def rank_code   = cols[3].trim()
+                        def taxid       = cols[4].trim()
+                        rank_code.startsWith('S') && taxid != '9606' && // human TaxID
+                            percent >= (params.kraken2_min_rel_abundance * 100) && reads_clade >= params.kraken2_min_reads
+                    }
+                    .collect { line -> line.tokenize('\t')[4].trim() }
+            }
+
+        // TODO: Optional view for learning, marked for removal.
+        ch_kraken2_taxids.view { taxid -> "[kraken2] taxid cleared both thresholds: ${taxid}" }
+    }
+
+    // ── STEP 6: BBSplit (optional) ──────────────────────────
+    // Screens trimmed reads against extra "contaminant" genomes
+    // (bacteria/fungi/virus) alongside the primary human genome,
+    // and keeps only the reads that best match the human genome.
+    // Contaminant genomes come from two places, merged together:
+    //   - --bbsplit_fasta_list: a static, user-curated CSV
+    //   - Kraken2 (if enabled): taxa actually detected in this run,
+    //     resolved to reference fastas via --kraken2_taxid_lookup
+    // One shared index is built from the union of both across the
+    // whole run and reused for every sample — index building is the
+    // expensive part, and this keeps every sample's stats comparable
+    // in MultiQC. Off by default: --perform_bbsplit false.
+
+    ch_filtered_reads = ch_trimmed_reads
+
+    if (params.perform_bbsplit) {
+        if (!params.bbsplit_fasta_list && !params.run_kraken2) {
+            error "Please provide --bbsplit_fasta_list and/or enable --run_kraken2 (contaminant genomes for BBSplit to screen against) when --perform_bbsplit is true."
+        }
+        if (!params.fasta) {
+            error "Please provide --fasta (the primary/target genome) when --perform_bbsplit is true."
+        }
+
+        // Static, user-curated list — read directly with Groovy rather
+        // than through a Nextflow channel, since it's the same for
+        // every sample and known up front, not per-sample data.
+        def static_refs = []
+        if (params.bbsplit_fasta_list) {
+            file(params.bbsplit_fasta_list, checkIfExists: true).eachLine { line ->
+                def (name, fasta_path) = line.tokenize(',')
+                static_refs << [ name, file(fasta_path, checkIfExists: true) ]
+            }
+        }
+
+        // Resolve the run-wide union of Kraken2-detected taxids to
+        // reference fastas, merge with the static list, and shape it
+        // into BBSplit's [other_ref_names, other_ref_paths] input.
+        // toList() (not collect()!) guarantees exactly one emission —
+        // an empty list [] if Kraken2 found nothing, or is off — so
+        // this always pairs correctly against every sample in
+        // ch_trimmed_reads. collect() looks equivalent but silently
+        // emits NOTHING on an empty source channel, which would
+        // starve BBMAP_BBSPLIT of its 4th input and it would never
+        // run at all — with no error to say why.
+        ch_bbsplit_refs = ch_kraken2_taxids
+            .unique()
+            .toList()
+            .view { taxids -> "[bbsplit] unique taxid list collapsed via toList(): ${taxids}" } // TODO: Optional view for learning, marked for removal.
+            .map { taxids ->
+                def kraken2_refs = []
+                if (taxids) {
+                    if (!params.kraken2_taxid_lookup) {
+                        error "Kraken2 detected contaminant taxa but --kraken2_taxid_lookup (CSV of taxid,name,fasta_path) was not provided; cannot resolve taxids to reference genomes."
+                    }
+                    def lookup = [:]
+                    file(params.kraken2_taxid_lookup, checkIfExists: true).eachLine { line ->
+                        def (taxid, name, fasta_path) = line.tokenize(',')
+                        lookup[taxid] = [ name, fasta_path ]
+                    }
+                    taxids.each { taxid ->
+                        if (lookup.containsKey(taxid)) {
+                            def (name, fasta_path) = lookup[taxid]
+                            kraken2_refs << [ name, file(fasta_path, checkIfExists: true) ]
+                        } else {
+                            log.warn "Kraken2 detected taxid ${taxid} but it has no entry in --kraken2_taxid_lookup — skipping it for BBSplit."
+                        }
+                    }
+                }
+                def all_refs = static_refs + kraken2_refs
+                if (all_refs.isEmpty()) {
+                    error "No contaminant references to screen against: --bbsplit_fasta_list is empty/unset and Kraken2 found no species-level taxa clearing the abundance/read-count thresholds. BBSplit needs at least one non-primary reference — either provide --bbsplit_fasta_list, or lower --kraken2_min_rel_abundance / --kraken2_min_reads, or disable --perform_bbsplit."
+                }
+                [ all_refs.collect { ref -> ref[0] }, all_refs.collect { ref -> ref[1] } ]
+            }
+            .view { refs -> "[bbsplit] final other_ref_names/other_ref_paths passed to BBMAP_BBSPLIT: ${refs}" } // TODO: Optional view for learning, marked for removal.
+
+        BBMAP_BBSPLIT(
+            ch_trimmed_reads,
+            [], // index: none pre-built, build on-the-fly from the fastas below
+            file(params.fasta, checkIfExists: true), // primary_ref: the human genome
+            ch_bbsplit_refs, // other_ref_names, other_ref_paths
+            false, // only_build_index: also split reads, not just build the index
+        )
+
+        ch_filtered_reads = BBMAP_BBSPLIT.out.primary_fastq
+        ch_multiqc_files = ch_multiqc_files.mix(BBMAP_BBSPLIT.out.stats.map{ _meta, file -> file })
+    }
+
+    // ── STEP 7: SortMeRNA (optional) ────────────────────────
+    // Ribosomal RNA depletion. Aligns reads against known rRNA
+    // reference sequences (--ribo_database_manifest: a text file
+    // listing one rRNA fasta path per line, e.g. the SILVA/rfam
+    // set nf-core/rnaseq ships) and keeps only the non-rRNA reads.
+    // Runs after BBSplit so index/filtering only sees reads already
+    // narrowed down to the primary genome. Off by default: needs
+    // --ribo_database_manifest when enabled.
+
+    if (params.remove_ribo_rna) {
+        if (!params.ribo_database_manifest) {
+            error "Please provide --ribo_database_manifest (path to a text file listing rRNA reference fasta paths, one per line) when --remove_ribo_rna is true."
+        }
+
+        // Same "read once, reuse across every sample" shape as the
+        // BBSplit reference list above: one shared set of rRNA fastas
+        // for the whole run, not per-sample data.
+        ch_sortmerna_fastas = channel.fromPath(params.ribo_database_manifest, checkIfExists: true)
+            .splitCsv()
+            .flatten()
+            .map { fasta_path -> file(fasta_path.trim(), checkIfExists: true) }
+            .collect()
+            .map { fastas -> [ [], fastas ] }
+
+        SORTMERNA(
+            ch_filtered_reads,
+            ch_sortmerna_fastas,
+            [ [], [] ], // index: none pre-built, build on-the-fly from the fastas above
+        )
+
+        ch_filtered_reads = SORTMERNA.out.reads
+        ch_multiqc_files = ch_multiqc_files.mix(SORTMERNA.out.log.map{ _meta, file -> file })
+    }
+
+    // ── STEP 8: STAR alignment ──────────────────────────────
+    // First step that stops treating reads as free-floating strings
+    // and asks "where in the genome did this come from?". STAR is a
+    // splice-aware aligner: an RNA read can span an exon-exon
+    // junction, so a chunk of it matches one place and the rest
+    // matches thousands of bases downstream, with the intron skipped
+    // in between. DNA aligners (bwa) would just soft-clip that read;
+    // STAR is built to split it across the junction, which is exactly
+    // what we need for a splicing-focused rare-disease pipeline.
+    //
+    // Two files come out of this that the rest of the pipeline needs:
+    //   - genome BAM  (Aligned.sortedByCoord.out.bam) — reads placed on
+    //     genomic coordinates. This is what phASER reads for ASE, and
+    //     what UMI-tools dedup will run on once it's wired up.
+    //   - transcriptome BAM (Aligned.toTranscriptome.out.bam) — the same
+    //     reads re-expressed in transcript coordinates, which is what
+    //     Salmon consumes in alignment-based mode. Produced by
+    //     --quantMode TranscriptomeSAM (see conf/modules.config), NOT a
+    //     second alignment run.
+    //
+    // WASP (--wasp_ase) is the third thing this step does, and the reason
+    // alignment has to happen at all rather than pseudoaligning: see the
+    // ch_wasp_vcf block below.
+
+    if (!params.fasta) {
+        error "Please provide --fasta (reference genome) — STAR alignment needs it, either to build an index or alongside a pre-built --star_index."
+    }
+    if (!params.gtf) {
+        error "Please provide --gtf (gene annotation) — STAR needs it to know where the splice junctions are, and Salmon downstream needs the same annotation."
+    }
+
+    // STAR reads the genome fasta and GTF with plain file I/O — unlike
+    // fastq inputs (where --readFilesCommand zcat handles it), there's
+    // no decompress-on-read hook for the reference. A .gz here doesn't
+    // error cleanly either; STAR/samtools faidx just choke on the
+    // binary. So decompress up front when needed.
+    //
+    // Both start as VALUE channels, which matters more than it looks:
+    // a queue channel is consumed as it's read, so the first sample
+    // would take the reference and every sample after it would hang
+    // waiting for a second emission that never comes. A value channel
+    // re-emits the same item to every sample instead. (Same class of
+    // trap as toList() vs collect() up in BBSplit.)
+    //
+    // No .first() is needed after GUNZIP/STAR_GENOMEGENERATE below:
+    // Nextflow infers a process's output as a value channel when ALL
+    // its inputs were value channels, which is the case here. Verified
+    // with a 2-sample run — one index build, both samples aligned.
+    ch_genome_fasta = channel.value([ [id: 'genome'], file(params.fasta, checkIfExists: true) ])
+    ch_genome_gtf   = channel.value([ [id: 'genome'], file(params.gtf,   checkIfExists: true) ])
+
+    if (params.fasta.endsWith('.gz')) {
+        GUNZIP_FASTA(ch_genome_fasta)
+        ch_genome_fasta = GUNZIP_FASTA.out.gunzip
+    }
+    if (params.gtf.endsWith('.gz')) {
+        GUNZIP_GTF(ch_genome_gtf)
+        ch_genome_gtf = GUNZIP_GTF.out.gunzip
+    }
+
+    // The index is the genome pre-chewed into STAR's suffix-array
+    // structure, plus the GTF's splice junctions baked in. Building it
+    // for a full human genome is the single most expensive step in the
+    // pipeline (~1h, ~32GB RAM), and the result depends only on the
+    // fasta+GTF pair — not on any sample. So: build once, reuse for
+    // every sample in the run, and let --star_index skip it entirely
+    // when one already exists on disk.
+    //
+    // NOTE: an index is only valid for the exact fasta it was built
+    // from. Swapping in a patient-specific genome later means a
+    // matching index — see the params.star_index note in nextflow.config.
+    if (params.star_index) {
+        ch_star_index = channel.value([ [id: 'star'], file(params.star_index, checkIfExists: true) ])
+    } else {
+        STAR_GENOMEGENERATE(ch_genome_fasta, ch_genome_gtf)
+        ch_star_index = STAR_GENOMEGENERATE.out.index
+    }
+
+    // ── WASP: reference-allele mapping bias ─────────────────
+    // The problem it solves: the reference genome carries one allele at
+    // every het site. A read carrying the OTHER allele has one extra
+    // mismatch, so it aligns very slightly worse — sometimes badly enough
+    // to be filtered or placed elsewhere. Aggregate that over a gene and
+    // the reference allele looks systematically over-expressed. phASER
+    // would happily report that artefact as allele-specific expression.
+    //
+    // WASP's fix: for every read overlapping a het site in the patient's
+    // VCF, swap the allele, re-map, and check the read still lands in the
+    // same place. Reads that move are flagged (vW tag) and dropped
+    // downstream. It's a filter on mapping, not on biology — which is why
+    // it needs the patient's OWN variants, not a population VCF.
+    //
+    // NOT a phasing step, and it does not need a phased VCF. STAR reads
+    // the GT field, takes the heterozygous SNVs, and swaps alleles one
+    // site at a time — which haplotype an allele belongs to never enters
+    // the calculation. 0/1 and 0|1 produce byte-identical BAMs (verified).
+    // phASER downstream is what actually needs the phasing; in practice
+    // the same trio-phased VCF feeds both, but for different reasons.
+    //
+    // Per-sample by construction: the VCF comes from the samplesheet's
+    // `vcf` column (folded into meta by assets/schema_input.json), so
+    // each patient is filtered against their own het sites.
+    ch_wasp_vcf = ch_filtered_reads.map { meta, _reads -> [ meta, [] ] }
+
+    if (params.wasp_ase) {
+        // STAR reads the VCF as plain text — a bgzipped VCF is not
+        // rejected with a clear message, STAR just fails to parse any
+        // variants and silently filters nothing. So decompress first.
+        ch_wasp_vcf_raw = ch_filtered_reads
+            .map { meta, _reads ->
+                if (!meta.vcf) {
+                    error "Sample '${meta.id}' has no `vcf` column value in --input, but --wasp_ase is true. WASP needs that patient's own genotyped VCF (a GT field with het SNVs; phasing is not required here); drop --wasp_ase to align without bias correction."
+                }
+                [ meta, file(meta.vcf, checkIfExists: true) ]
+            }
+            .branch { _meta, vcf ->
+                gzipped: vcf.name.endsWith('.gz')
+                plain: true
+            }
+
+        GUNZIP_VCF(ch_wasp_vcf_raw.gzipped)
+
+        ch_wasp_vcf = ch_wasp_vcf_raw.plain.mix(GUNZIP_VCF.out.gunzip)
+    }
+
+    // join on the meta map so each sample's reads meet its own VCF, and a
+    // mismatch fails loudly rather than pairing the wrong patient's
+    // variants with the wrong reads (which join by position would do).
+    ch_star_input = ch_filtered_reads.join(ch_wasp_vcf, failOnMismatch: true, failOnDuplicate: true)
+
+    STAR_ALIGN_WASP(
+        ch_star_input.map { meta, reads, _vcf -> [ meta, reads ] }, // whatever survived trimming + the optional BBSplit/SortMeRNA filters
+        ch_star_index,
+        ch_genome_gtf,
+        ch_star_input.map { meta, _reads, vcf -> [ meta, vcf ] },
+        params.star_ignore_sjdbgtf, // true = ignore the GTF at align time and rely purely on the index's baked-in junctions
+    )
+
+    // Genome-coordinate BAM: phASER (ASE) and UMI-tools dedup input.
+    ch_genome_bam = STAR_ALIGN_WASP.out.bam_sorted_aligned
+
+    // Transcript-coordinate BAM: Salmon quantification input (STEP 10).
+    ch_transcriptome_bam = STAR_ALIGN_WASP.out.bam_transcript
+
+    // TODO: Optional views for learning, marked for removal.
+    ch_genome_bam.view { meta, bam -> "[star] genome BAM for ${meta.id}: ${bam}" }
+    ch_transcriptome_bam.view { meta, bam -> "[star] transcriptome BAM for ${meta.id}: ${bam}" }
+
+
+    // ── STEP 9: UMI-tools dedup (optional) ──────────────────
+    // The other half of STEP 2. Back then the UMI was only moved out of the
+    // sequence and parked in the read name; nothing had been deduplicated,
+    // because you can't tell a PCR duplicate from a genuinely re-sequenced
+    // fragment until you know where both reads landed. Now STAR has placed
+    // them, so: reads sharing an alignment position AND a UMI came from one
+    // original molecule amplified multiple times — keep one, drop the rest.
+    // Position alone would throw away real duplicate-position fragments,
+    // which is exactly what UMIs exist to prevent.
+    //
+    // Runs whenever STEP 2 ran (--extract_umi): if the UMIs were extracted,
+    // deduplicating on them is the whole point of having done so.
+    //
+    // Deduplication happens ONCE, here, on the genome BAM — then the same
+    // verdict is propagated to the transcriptome BAM by read name. Doing an
+    // independent dedup run on the transcriptome BAM would be a bug: its
+    // coordinates are per-transcript, so one fragment appears at a different
+    // position in every compatible isoform and "same UMI + same position"
+    // stops meaning what dedup thinks it means.
+
+    if (params.extract_umi) {
+        // umi_tools dedup does random access over the BAM, so it needs the
+        // .bai alongside it — STAR emits a sorted BAM but no index.
+        SAMTOOLS_INDEX_STAR(ch_genome_bam)
+
+        UMITOOLS_DEDUP(
+            ch_genome_bam.join(SAMTOOLS_INDEX_STAR.out.index, failOnMismatch: true, failOnDuplicate: true),
+            false, // get_output_stats: the per-UMI/edit-distance TSVs are slow and memory-hungry on real data; the .log already carries the counts MultiQC shows
+        )
+
+        ch_genome_bam = UMITOOLS_DEDUP.out.bam
+
+        // Index the deduplicated BAM too — this is the BAM phASER reads, and
+        // it needs random access by coordinate.
+        SAMTOOLS_INDEX_DEDUP(ch_genome_bam)
+
+        // Propagate the dedup verdict into transcript space for Salmon.
+        // meta-joined so a sample's transcriptome BAM is only ever filtered
+        // against its own surviving read names.
+        ch_dedup_pairs = ch_transcriptome_bam.join(ch_genome_bam, failOnMismatch: true, failOnDuplicate: true)
+
+        BAM_KEEP_READNAMES(
+            ch_dedup_pairs.map { meta, tx_bam, _genome_bam -> [ meta, tx_bam ] },
+            ch_dedup_pairs.map { meta, _tx_bam, genome_bam -> [ meta, genome_bam ] },
+        )
+
+        ch_transcriptome_bam = BAM_KEEP_READNAMES.out.bam
+
+        // MultiQC has a umitools/dedup section: reads in vs. out, i.e. the
+        // duplication rate the UMIs actually caught.
+        ch_multiqc_files = ch_multiqc_files.mix(UMITOOLS_DEDUP.out.log.map{ _meta, file -> file })
+
+        // TODO: Optional views for learning, marked for removal.
+        ch_genome_bam.view { meta, bam -> "[dedup] deduplicated genome BAM for ${meta.id}: ${bam}" }
+        ch_transcriptome_bam.view { meta, bam -> "[dedup] read-name-filtered transcriptome BAM for ${meta.id}: ${bam}" }
+    }
+
+    // Log.final.out is STAR's mapping-rate summary (uniquely mapped %,
+    // multimappers, reads lost to being too short) — the single most
+    // informative QC number in the whole run, so it goes to MultiQC.
+    ch_multiqc_files = ch_multiqc_files.mix(STAR_ALIGN_WASP.out.log_final.map{ _meta, file -> file })
+
+
+    // ── STEP 10: Salmon quantification ──────────────────────
+    // Turns alignments into numbers: how much of each transcript was in the
+    // sample. The hard part isn't counting, it's that most reads are
+    // compatible with several isoforms of the same gene — a read from a
+    // shared exon can't tell you which isoform it came from. Salmon runs an
+    // EM over all reads at once: isoforms with reads at their unique regions
+    // get credit, and that in turn settles how the ambiguous shared-exon
+    // reads get apportioned. Counting reads per gene (STAR's ReadsPerGene)
+    // can't do that, and isoform-level resolution is the whole point for a
+    // splicing-focused rare-disease pipeline.
+    //
+    // ALIGNMENT-BASED mode (-a), not selective alignment: Salmon is handed
+    // STAR's transcriptome BAM instead of doing its own mapping. That's
+    // forced by the architecture — phASER needs real alignments anyway, so
+    // the BAM already exists, and reusing it means quantification and ASE
+    // are describing the exact same set of reads. When dedup ran (STEP 9),
+    // this is the read-name-filtered BAM, so PCR duplicates are already out.
+    //
+    // --libType A: strandedness is auto-detected per sample rather than
+    // declared up front, which is why no --strandedness param exists.
+    // The detected result lands in lib_format_counts.json — worth a look if
+    // a sample's mapping rate is unexpectedly bad.
+
+    // Salmon in alignment mode needs the actual transcript SEQUENCES: the
+    // BAM only names transcripts and gives coordinates, and Salmon needs
+    // each one's length and sequence composition for effective-length and
+    // bias correction. Default is to cut them out of the same fasta+GTF
+    // pair STAR indexed, which is what makes the transcript set provably
+    // identical to the BAM's headers — Salmon aborts if they disagree.
+    if (params.transcript_fasta) {
+        ch_transcript_fasta = channel.value([ [id: 'transcripts'], file(params.transcript_fasta, checkIfExists: true) ])
+        if (params.transcript_fasta.endsWith('.gz')) {
+            GUNZIP_TRANSCRIPT_FASTA(ch_transcript_fasta)
+            ch_transcript_fasta = GUNZIP_TRANSCRIPT_FASTA.out.gunzip
+        }
+        ch_transcript_fasta = ch_transcript_fasta.map { _meta, fasta -> fasta }
+    } else {
+        // gffread -w: splice each transcript's exons together and write the
+        // mature sequence. (See conf/modules.config for the flag.)
+        GFFREAD(ch_genome_gtf, ch_genome_fasta.map { _meta, fasta -> fasta })
+        ch_transcript_fasta = GFFREAD.out.gffread_fasta.map { _meta, fasta -> fasta }
+    }
+
+    SALMON_QUANT(
+        ch_transcriptome_bam,
+        [], // index: alignment mode reads the BAM, so there's no Salmon index to build or load
+        ch_genome_gtf.map { _meta, gtf -> gtf }, // --geneMap: also roll transcripts up to genes (quant.genes.sf), which is what deconvolution downstream wants
+        ch_transcript_fasta,
+        true, // alignment_mode
+        'A',  // lib_type: auto-detect strandedness per sample
+    )
+
+    ch_salmon_results = SALMON_QUANT.out.results
+
+    // TODO: Optional view for learning, marked for removal.
+    ch_salmon_results.view { meta, results -> "[salmon] quant dir for ${meta.id}: ${results}" }
+
+    // MultiQC reads meta_info.json out of the quant dir — mapping rate and
+    // the number of transcripts quantified.
+    ch_multiqc_files = ch_multiqc_files.mix(ch_salmon_results.map{ _meta, results -> results })
 
     //
     // Collate and save software versions

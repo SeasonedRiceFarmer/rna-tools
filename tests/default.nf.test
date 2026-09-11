@@ -6,9 +6,40 @@ nextflow_pipeline {
 
     test("-profile test") {
 
+        setup {
+            // The test data is committed in the repo, but the paths INSIDE
+            // these three files are relative (e.g. assets/test_data/fastq/...)
+            // and Nextflow resolves them against the launch directory. A plain
+            // `nextflow run` from the repo root works by luck; nf-test launches
+            // each test from its own directory, where those paths resolve to
+            // nothing and schema validation fails before the pipeline starts.
+            //
+            // So rewrite them with absolute $projectDir paths first. They go
+            // one level above $outputDir on purpose — anything written inside
+            // it lands in the snapshot, and these files contain machine-specific
+            // absolute paths, which would make the snapshot unreproducible.
+            def generated = new File("${outputDir}/../test_data")
+            generated.mkdirs()
+            [
+                'samplesheet_test.csv',
+                'bbsplit_fasta_list_test.csv',
+                'ribo_database_manifest_test.txt',
+            ].each { name ->
+                def source = new File("${projectDir}/assets/test_data/${name}")
+                new File(generated, name).text = source.text.replace(
+                    'assets/test_data',
+                    "${projectDir}/assets/test_data"
+                )
+            }
+        }
+
         when {
             params {
                 outdir = "$outputDir"
+                // The rewritten copies from setup, not the committed originals.
+                input                  = "$outputDir/../test_data/samplesheet_test.csv"
+                bbsplit_fasta_list     = "$outputDir/../test_data/bbsplit_fasta_list_test.csv"
+                ribo_database_manifest = "$outputDir/../test_data/ribo_database_manifest_test.txt"
             }
         }
 

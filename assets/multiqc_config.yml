@@ -12,3 +12,21 @@ report_section_order:
 export_plots: true
 
 disable_version_detection: true
+
+# Run the FastQC module twice — once over the raw reads, once over
+# fastp's trimmed output (tagged "_trimmed" in the workflow) — so the
+# report shows two labeled sections instead of merging both sets of
+# samples into one FastQC table.
+module_order:
+  - fastqc:
+      name: "FastQC (raw)"
+      info: "FastQC run on the raw, untrimmed reads."
+      path_filters:
+        - "*_fastqc.zip"
+      path_filters_exclude:
+        - "*_trimmed_*_fastqc.zip"
+  - fastqc:
+      name: "FastQC (trimmed)"
+      info: "FastQC run on reads after fastp trimming."
+      path_filters:
+        - "*_trimmed_*_fastqc.zip"

@@ -1,0 +1,1 @@
+assets/test_data/reference/rrna_5_8s_test.fasta
