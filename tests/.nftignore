@@ -10,3 +10,33 @@ multiqc/multiqc_plots/{svg,pdf,png}/*.{svg,pdf,png}
 multiqc/multiqc_report.html
 fastqc/*_fastqc.{html,zip}
 pipeline_info/*.{html,json,txt,yml}
+# ── Non-deterministic outputs: paths are still snapshotted (so a missing
+# file is still caught), but their byte content is not hashed.
+# Verified 2026-09-10 by running the pipeline twice on one machine.
+#
+# Embedded timestamps / runtime stats:
+bbmap/*.log
+fastp/*.fastp.html
+sortmerna/*.sortmerna.log
+sortmerna/idx/*.stats
+star/*.Log.{final,progress}.out
+umitools/*.umi_extract.log
+umitools/dedup/*.log
+# gzip headers embed an mtime, so the md5 changes every run:
+bbmap/*_primary_{1,2}.fastq.gz
+sortmerna/*.non_rRNA.fastq.gz
+salmon/*/aux_info/*.gz
+# BAMs: @PG records the command line, and BGZF blocks vary run to run:
+star/*.bam
+umitools/dedup/*.{bam,bai}
+# Salmon: with only ~300 mapped fragments in this test set, the fragment
+# length distribution estimate shifts a few bases between runs, moving
+# EffectiveLength on every transcript and TPM on some. Expected at this
+# depth; a real sample converges. cmd_info.json/lib_format_counts.json
+# are deliberately NOT ignored — those stay stable and worth checking.
+salmon/*_meta_info.json
+salmon/*/aux_info/meta_info.json
+salmon/*/libParams/flenDist.txt
+salmon/*/logs/salmon_quant.log
+salmon/*/quant.{sf,genes.sf}
+multiqc/multiqc_data/{multiqc_salmon,salmon_plot}.txt
