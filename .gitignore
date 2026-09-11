@@ -9,3 +9,5 @@ testing*
 null/
 .lineage/
 claude.md*
+.nf-test/
+.nf-test.log
